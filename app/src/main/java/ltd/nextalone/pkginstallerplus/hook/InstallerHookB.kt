@@ -2,6 +2,7 @@ package ltd.nextalone.pkginstallerplus.hook
 
 import android.app.Activity
 import android.app.Dialog
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.graphics.Typeface
@@ -20,6 +21,12 @@ import ltd.nextalone.pkginstallerplus.utils.*
 private const val TAG_INSTALL_DETAILS = "IPP_install_details"
 private const val TAG_UNINSTALL_DETAILS = "IPP_uninstall_details"
 
+/**
+ * Package Installer "v2" as found in the Android 16 QPR2 sources (LineageOS lineage-23.2): a
+ * single InstallationFragment / UninstallationFragment whose updateUI() is re-run on every stage
+ * change. The earlier per-stage variant (InstallConfirmationFragment etc., present in the
+ * lineage-22.2, 23.0 and 23.1 sources) is handled by [InstallerHookV2].
+ */
 object InstallerHookB {
     fun initOnce() {
         "$INSTALLER_V2_PKG.fragments.InstallationFragment".clazz?.method("updateUI")?.hookAfter {
@@ -30,17 +37,7 @@ object InstallerHookB {
                 fragment.javaClass.getMethod("requireActivity").invoke(fragment) as? Activity
                     ?: return@hookAfter
 
-            val isConfirmation = runCatching {
-                val viewModel = activity.get("installViewModel") ?: return@hookAfter
-                val liveData = listOf("_currentInstallStage", "currentInstallStage")
-                    .firstNotNullOfOrNull { key -> viewModel.get(key) }
-
-                liveData?.get("mData")?.javaClass?.simpleName == "InstallUserActionRequired"
-            }.getOrElse { e ->
-                false
-            }
-
-            if (isConfirmation) {
+            if (isUserActionRequired(activity)) {
                 injectModuleResources(activity.resources)
                 addInstallDetails(activity, dialog)
             } else {
@@ -60,6 +57,26 @@ object InstallerHookB {
         }
     }
 
+    private fun findInstallViewModel(activity: Activity): Any? =
+        activity.get("installViewModel") ?: activity.fieldByType("viewmodel.InstallViewModel")
+
+    /**
+     * True while the install confirmation (or another "user action required") dialog is shown.
+     *
+     * The stage is read through the public getters (getCurrentInstallStage().getValue()) first,
+     * because they are part of the API and survive field renames; the private LiveData fields
+     * are only a fallback.
+     */
+    private fun isUserActionRequired(activity: Activity): Boolean {
+        val viewModel = findInstallViewModel(activity) ?: return false
+        val liveData = viewModel.callOrNull("getCurrentInstallStage")
+            ?: listOf("_currentInstallStage", "currentInstallStage")
+                .firstNotNullOfOrNull { key -> viewModel.get(key) }
+            ?: return false
+        val stage = liveData.callOrNull("getValue") ?: liveData.get("mData") ?: liveData.get("data")
+        return stage?.javaClass?.simpleName == "InstallUserActionRequired"
+    }
+
     private fun addInstallDetails(
         activity: Activity,
         dialog: Dialog,
@@ -69,11 +86,17 @@ object InstallerHookB {
 
         if (parent.findViewWithTag<TextView>(TAG_INSTALL_DETAILS) != null) return
 
-        val viewModel = activity.get("installViewModel") ?: return
-        val repository = viewModel.get("repository") ?: return
-        val newPkgInfo = repository.get("newPackageInfo") as? PackageInfo ?: return
-        val usrManager = repository.get("userManager") as? UserManager ?: return
-        
+        val viewModel = findInstallViewModel(activity) ?: return
+        val repository = viewModel.get("repository")
+            ?: viewModel.fieldByType("model.InstallRepository")
+            ?: return
+        val newPkgInfo = (repository.get("newPackageInfo") as? PackageInfo)
+            ?: (repository.fieldByType("android.content.pm.PackageInfo") as? PackageInfo)
+            ?: return
+        val usrManager = (repository.get("userManager") as? UserManager)
+            ?: activity.getSystemService(UserManager::class.java)
+            ?: return
+
         val oldPkgInfo = try {
             activity.packageManager.getPackageInfoOrNull(newPkgInfo.packageName)
         } catch (e: Exception) {
@@ -145,10 +168,16 @@ object InstallerHookB {
 
         if (parent.findViewWithTag<TextView>(TAG_UNINSTALL_DETAILS) != null) return
 
-        val viewModel = activity.get("uninstallViewModel") ?: return
-        val repository = viewModel.get("repository") ?: return
-        val packageName = repository.get("targetPackageName") as? String ?: return
-        
+        val viewModel = activity.get("uninstallViewModel")
+            ?: activity.fieldByType("viewmodel.UninstallViewModel")
+            ?: return
+        val repository = viewModel.get("repository")
+            ?: viewModel.fieldByType("model.UninstallRepository")
+            ?: return
+        val packageName = (repository.get("targetPackageName") as? String)
+            ?: (repository.fieldByType("android.content.pm.ApplicationInfo") as? ApplicationInfo)?.packageName
+            ?: return
+
         val pkgInfo = try {
             activity.packageManager.getPackageInfo(packageName, PackageManager.MATCH_UNINSTALLED_PACKAGES)
         } catch (e: PackageManager.NameNotFoundException) {

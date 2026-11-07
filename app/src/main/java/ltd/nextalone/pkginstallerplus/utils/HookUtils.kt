@@ -2,14 +2,45 @@ package ltd.nextalone.pkginstallerplus.utils
 
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.os.Build
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XC_MethodReplacement
 import de.robv.android.xposed.XposedBridge
 import ltd.nextalone.pkginstallerplus.HookEntry
 import java.lang.reflect.Member
 import java.lang.reflect.Method
+import java.lang.reflect.Modifier
 
 const val INSTALLER_V2_PKG = "com.android.packageinstaller.v2.ui"
+
+internal fun logInfo(msg: String) {
+    XposedBridge.log("InstallerPlus: $msg")
+}
+
+internal fun logError(msg: String, e: Throwable) {
+    XposedBridge.log("InstallerPlus: $msg: $e")
+    XposedBridge.log(e)
+}
+
+/**
+ * Writes one line to the LSPosed log saying which installer variant is present in this process,
+ * so a "module does nothing" report can be told apart from a "wrong hook target" report.
+ */
+fun logEnvironment(pkg: String) {
+    val probes = listOf(
+        "com.android.packageinstaller.PackageInstallerActivity",
+        "$INSTALLER_V2_PKG.InstallLaunch",
+        "$INSTALLER_V2_PKG.fragments.InstallConfirmationFragment",
+        "$INSTALLER_V2_PKG.fragments.InstallationFragment"
+    )
+    val found = probes.joinToString(", ") { it.substringAfterLast('.') + "=" + (it.clazz != null) }
+    val sdkFull = try {
+        Build.VERSION::class.java.getField("SDK_INT_FULL").getInt(null).toString()
+    } catch (e: Throwable) {
+        "n/a"
+    }
+    logInfo("loaded in $pkg, SDK_INT=${Build.VERSION.SDK_INT}, SDK_INT_FULL=$sdkFull, $found")
+}
 
 internal val String.clazz: Class<*>?
     get() = try {
@@ -19,8 +50,11 @@ internal val String.clazz: Class<*>?
     }
 
 internal fun Member.hook(callback: XC_MethodHook) = try {
-    XposedBridge.hookMethod(this, callback)
+    val unhook = XposedBridge.hookMethod(this, callback)
+    logInfo("hooked $this")
+    unhook
 } catch (e: Throwable) {
+    logError("failed to hook $this", e)
     null
 }
 
@@ -28,7 +62,7 @@ internal inline fun Member.hookBefore(crossinline hooker: (XC_MethodHook.MethodH
     override fun beforeHookedMethod(param: MethodHookParam?) = try {
         hooker(param!!)
     } catch (e: Throwable) {
-        Unit
+        logError("hookBefore callback failed", e)
     }
 })
 
@@ -36,7 +70,7 @@ internal inline fun Member.hookAfter(crossinline hooker: (XC_MethodHook.MethodHo
     override fun afterHookedMethod(param: MethodHookParam?) = try {
         hooker(param!!)
     } catch (e: Throwable) {
-        Unit
+        logError("hookAfter callback failed", e)
     }
 })
 
@@ -120,6 +154,52 @@ internal fun Class<*>.method(name: String, size: Int, returnType: Class<*>, cond
         if (it.name == name && it.returnType == returnType && it.parameterTypes.size == size && condition(it)) {
             return it
         }
+    }
+    return null
+}
+
+/**
+ * Calls a no-argument method by name (searching superclasses, private ones included).
+ * Public getters are far more stable across Android releases than private field names,
+ * so prefer this over [get] when a getter exists. Returns null on any failure.
+ */
+internal fun Any.callOrNull(name: String): Any? {
+    try {
+        var c: Class<*>? = this.javaClass
+        while (c != null) {
+            for (m in c.declaredMethods) {
+                if (m.name == name && m.parameterTypes.isEmpty()) {
+                    m.isAccessible = true
+                    return m.invoke(this)
+                }
+            }
+            c = c.superclass
+        }
+    } catch (e: Throwable) {
+        logError("callOrNull($name) on ${this.javaClass.name}", e)
+    }
+    return null
+}
+
+/**
+ * Returns the value of the first non-null instance field whose declared type name ends with
+ * [typeNameSuffix]. Used as a fallback when a field was renamed between Android releases.
+ */
+internal fun Any.fieldByType(typeNameSuffix: String): Any? {
+    try {
+        var c: Class<*>? = this.javaClass
+        while (c != null) {
+            for (f in c.declaredFields) {
+                if (!Modifier.isStatic(f.modifiers) && f.type.name.endsWith(typeNameSuffix)) {
+                    f.isAccessible = true
+                    val v = f.get(this)
+                    if (v != null) return v
+                }
+            }
+            c = c.superclass
+        }
+    } catch (e: Throwable) {
+        logError("fieldByType($typeNameSuffix) on ${this.javaClass.name}", e)
     }
     return null
 }

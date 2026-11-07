@@ -11,13 +11,16 @@ import java.lang.reflect.Method;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.IXposedHookZygoteInit;
+import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 import ltd.nextalone.pkginstallerplus.hook.InstallerHookB;
 import ltd.nextalone.pkginstallerplus.hook.InstallerHookN;
 import ltd.nextalone.pkginstallerplus.hook.InstallerHookQ;
+import ltd.nextalone.pkginstallerplus.hook.InstallerHookV2;
 
 import static ltd.nextalone.pkginstallerplus.utils.HookUtilsKt.isV2InstallerAvailable;
+import static ltd.nextalone.pkginstallerplus.utils.HookUtilsKt.logEnvironment;
 
 public class HookEntry implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
@@ -30,20 +33,35 @@ public class HookEntry implements IXposedHookLoadPackage, IXposedHookZygoteInit 
 
     private static void initializeHookInternal(LoadPackageParam lpparam) {
         lpClassLoader = lpparam.classLoader;
+        // One line in the LSPosed module log telling which installer variant this device has.
+        logEnvironment(lpparam.packageName);
         if (isV2InstallerAvailable()) {
+            // Each hook only attaches to classes that exist in its own installer variant, so it is
+            // safe to try all of them: a hook whose target class is missing simply does nothing.
+            // Android 16 QPR2+: single InstallationFragment / UninstallationFragment.
             try {
                 InstallerHookB.INSTANCE.initOnce();
-            } catch (Exception e) {
+            } catch (Throwable e) {
+                XposedBridge.log(e);
+            }
+            // Android 15 QPR / Android 16 / Android 16 QPR1: one DialogFragment per stage.
+            try {
+                InstallerHookV2.INSTANCE.initOnce();
+            } catch (Throwable e) {
+                XposedBridge.log(e);
             }
         }
+        // Classic PackageInstallerActivity (used whenever the v2 installer is not enabled).
         try {
             if (VERSION.SDK_INT >= VERSION_CODES.Q) {
                 InstallerHookQ.INSTANCE.initOnce();
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            XposedBridge.log(e);
             try {
                 InstallerHookN.INSTANCE.initOnce();
-            } catch (Exception e1) {
+            } catch (Throwable e1) {
+                XposedBridge.log(e1);
             }
         }
     }
