@@ -32,7 +32,7 @@ jobs:
           java-version: '21'
 
       - name: Setup Android SDK Tools
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Add local.properties
         run: echo ‘sdk.dir=/usr/local/lib/android/sdk’ >>${{ github.workspace }}/local.properties
@@ -49,3 +49,12 @@ jobs:
         with:
           name: InstallerPlus-release
           path: ${{ github.workspace }}/app/build/outputs/apk/release
+
+      # The release APK above is unsigned. The debug APK is signed with the
+      # debug key by Gradle, so it can be installed directly.
+      - name: Upload debug package (installable)
+        uses: actions/upload-artifact@v7
+        if: success()
+        with:
+          name: InstallerPlus-debug
+          path: ${{ github.workspace }}/app/build/outputs/apk/debug
